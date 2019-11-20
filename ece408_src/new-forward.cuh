@@ -9,10 +9,9 @@ namespace mxnet
 namespace op
 {
 
+#define MASK_WIDTH 5
 #define TILE_WIDTH 16
 
-__constant__ float constOne[12 * 7 * 7];
-__constant__ float constTwo[24 *12 * 7 * 7];
 
 __global__ void forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K, const int W_grid)
 {
@@ -26,10 +25,6 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
 
-    // if (C == 1)
-    //     k = constOne;
-    // else
-    //     k = constTwo;
     // (void)H_out; // silence declared but never referenced warning. remove this line when you start working
     // (void)W_out; // silence declared but never referenced warning. remove this line when you start working
 
@@ -39,21 +34,33 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
 #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
 #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+    __shared__ float cache[12][TILE_WIDTH+MASK_WIDTH-1][TILE_WIDTH+MASK_WIDTH-1];
 
     int n, m, h, w, c, p, q;
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
     n = blockIdx.x;
     m = blockIdx.y;
-    h = (blockIdx.z / W_grid)*TILE_WIDTH + threadIdx.y;
-    w = (blockIdx.z % W_grid)*TILE_WIDTH + threadIdx.x;
+    h = (blockIdx.z / W_grid)*TILE_WIDTH + ty;
+    w = (blockIdx.z % W_grid)*TILE_WIDTH + tx;
+
+    for (c = 0; c < C; c++) {
+        if (h < H && w < W) {
+            cache[c][ty][tx] = x4d(n, c, h, w);
+        } else {
+            cache[c][ty][tx] = 0;
+        }
+    }
+
+    __syncthreads();
 
     float acc = 0;
-    if(h < H_out && w < W_out) {
-        #pragma unroll
+    if (tx < TILE_WIDTH && ty < TILE_WIDTH && h < H_out && w < W_out) {
         for(c = 0; c < C; c++ ) {
             for(p=0; p < K; p++) {
                 for(q = 0; q < K; q++) {
                     if (h+p < H && w+q < W) {
-                        acc += x4d(n, c, h+p, w+q) * k4d(m, c, p, q);
+                        acc += cache[c][ty+p][tx+q] * k4d(m, c, p, q);
                     }
                 }
             }
@@ -100,7 +107,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
 
     int Z = H_grid * W_grid;
     dim3 gridDim(B, M, Z);
-    dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1);
+    dim3 blockDim(TILE_WIDTH+MASK_WIDTH-1, TILE_WIDTH+MASK_WIDTH-1, 1);
 
     // Call the kernel
     forward_kernel<<<gridDim, blockDim, 0>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K, W_grid);
