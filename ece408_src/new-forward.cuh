@@ -11,7 +11,9 @@ namespace op
 
 #define MASK_WIDTH 5
 #define TILE_WIDTH 16
+#define KERNEL_SIZE 24*12*MASK_WIDTH*MASK_WIDTH
 
+__constant__ float deviceKernel[KERNEL_SIZE];
 
 __global__ void forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K, const int W_grid)
 {
@@ -33,7 +35,7 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 // y4d(0,0,0,0) = a
 #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
 #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-#define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+#define k4d(i3, i2, i1, i0) deviceKernel[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
     __shared__ float cache[12][TILE_WIDTH+MASK_WIDTH-1][TILE_WIDTH+MASK_WIDTH-1];
 
     int n, m, h, w, c, p, q;
@@ -56,8 +58,11 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 
     float acc = 0;
     if (tx < TILE_WIDTH && ty < TILE_WIDTH && h < H_out && w < W_out) {
+        #pragma unroll
         for(c = 0; c < C; c++ ) {
+            #pragma unroll
             for(p=0; p < K; p++) {
+                #pragma unroll
                 for(q = 0; q < K; q++) {
                     if (h+p < H && w+q < W) {
                         acc += cache[c][ty+p][tx+q] * k4d(m, c, p, q);
@@ -104,6 +109,8 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
 
     // int width = (W_out-1) / TILE_WIDTH + 1;
     // int height = (H_out-1) / TILE_WIDTH + 1;
+
+    cudaMemcpyToSymbol(deviceKernel, w.dptr_, M * C * K * K * sizeof(float), 0, cudaMemcpyHostToDevice);
 
     int Z = H_grid * W_grid;
     dim3 gridDim(B, M, Z);
